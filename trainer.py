@@ -401,17 +401,21 @@ def train(name, hparams, multi_gpu=False, n_models=1, train_completeness_thresho
           eval_sampling=1.0, eval_memsize=5, gpu=0, gpu_allow_growth=False, save_best_model=False,
           forward_split=False, write_summaries=False, verbose=False, asgd_decay=None, tqdm=True,
           side_split=True, max_steps=None, save_from_step=None, do_eval=True, predict_window=63):
-
+    # 内容能存放多少条训练数据
     eval_k = int(round(26214 * eval_memsize / n_models))
+    # rnn_depth 代表rnn输出结果长度
     eval_batch_size = int(
         eval_k / (hparams.rnn_depth * hparams.encoder_rnn_layers))  # 128 -> 1024, 256->512, 512->256
+    # 0.1比例验证
     eval_pct = 0.1
+    # 256
     batch_size = hparams.batch_size
+    # 283-63 seq2seq
     train_window = hparams.train_window
     tf.reset_default_graph()
     if seed:
         tf.set_random_seed(seed)
-
+    # 分成三折 ，没有用side_split
     with tf.device("/cpu:0"):
         inp = VarFeeder.read_vars("data/vars")
         if side_split:
@@ -422,10 +426,13 @@ def train(name, hparams, multi_gpu=False, n_models=1, train_completeness_thresho
 
     real_train_pages = splitter.splits[0].train_size
     real_eval_pages = splitter.splits[0].test_size
-
+    # 14503.6
     items_per_eval = real_eval_pages * eval_pct
+    # 14503.6/490 =30
     eval_batches = int(np.ceil(items_per_eval / eval_batch_size))
+    # 145036/256 =566 也就是训练完全部数据(epoch) 多少个batch
     steps_per_epoch = real_train_pages // batch_size
+    # 训练57个batch后eval一次；eval一共才30个？
     eval_every_step = int(round(steps_per_epoch * eval_pct))
     # eval_every_step = int(round(items_per_eval * train_sampling / batch_size))
 
@@ -525,9 +532,10 @@ def train(name, hparams, multi_gpu=False, n_models=1, train_completeness_thresho
     if avg_sgd:
         from itertools import chain
         def ema_vars(model):
+            # 计算每个参数滑动平均序列
             ema = model.train_model.ema
             return {ema.average_name(v):v for v in model.train_model.ema._averages}
-
+        # 链式迭代器 多个模型的参数合并到一起生成一个字典
         ema_names = dict(chain(*[ema_vars(model).items() for model in all_models]))
         #ema_names = all_models[0].train_model.ema.variables_to_restore()
         ema_loader = tf.train.Saver(var_list=ema_names,  max_to_keep=1, name='ema_loader')
@@ -581,7 +589,7 @@ def train(name, hparams, multi_gpu=False, n_models=1, train_completeness_thresho
 
         for epoch in range(max_epoch):
 
-            # n_steps = pusher.n_pages // batch_size
+            # 一个epoch多少个batch
             if tqdm:
                 tqr = trange(steps_per_epoch, desc="%2d" % (epoch + 1), leave=False)
             else:
@@ -599,7 +607,7 @@ def train(name, hparams, multi_gpu=False, n_models=1, train_completeness_thresho
                 if step % eval_every_step == 0:
                     if eval_stages:
                         trainer.eval_step(sess, epoch, step, eval_batches, stages=eval_stages)
-
+                    # 保存好的参数
                     if save_best_model and epoch > 0 and eval_smape.last < best_smape:
                         best_smape = eval_smape.last
                         saver.save(sess, f'data/cpt/{name}/cpt', global_step=step)
@@ -620,12 +628,14 @@ def train(name, hparams, multi_gpu=False, n_models=1, train_completeness_thresho
                 SMAPE = "%s%.3f/%.3f/%.3f" % (improvement, eval_smape.last, eval_smape_side.last,  train_smape.last)
                 if tqdm:
                     tqr.set_postfix(gr=grad_norm.last, MAE=MAE, SMAPE=SMAPE)
+                # 都不提升或者到了一次步数
                 if not trainer.has_active() or (max_steps and step > max_steps):
                     break
 
             if tqdm:
                 tqr.close()
             trainer.end_epoch()
+            # 第一次epoch后一直没有提升
             if not best_epoch_smape or eval_smape.avg_epoch < best_epoch_smape[0]:
                 best_epoch_smape = [eval_smape.avg_epoch]
             else:
@@ -694,6 +704,7 @@ def predict(checkpoints, hparams, return_x=False, verbose=False, predict_window=
     x_buffer = []
     predictions = None
     with tf.Session(config=tf.ConfigProto(gpu_options=tf.GPUOptions(allow_growth=True))) as sess:
+        # 装在要训练的数据
         pipe.load_vars(sess)
         for checkpoint in checkpoints:
             pred_buffer = []
@@ -771,9 +782,18 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     param_dict = dict(vars(args))
+
+    ###运行参数
+    param_dict['n_models'] =3
+    param_dict['max_epoch'] =1
+    param_dict['asgd_decay'] = 0.99
+    param_dict['max_steps'] = 11500
+    param_dict['save_from_step'] = 10500
+
     param_dict['hparams'] = build_from_set(args.hparam_set)
     del param_dict['hparam_set']
     train(**param_dict)
+    # predict(**param_dict)
 
     # hparams = build_hparams()
     # result = train("definc_attn", hparams, n_models=1, train_sampling=1.0, eval_sampling=1.0, patience=5, multi_gpu=True,
@@ -784,3 +804,10 @@ if __name__ == '__main__':
     # print("Training result:", result)
     # preds = predict('data/cpt/fair_365-15428', 380, hparams, verbose=True, back_offset=60, n_models=3)
     # print(preds)
+
+    # `python
+    # trainer.py - -name
+    # s32 - -hparam_set = s32 - -n_models = 3 - -name
+    # s32 - -no_eval - -no_forward_split
+    # --asgd_decay = 0.99 - -max_steps = 11500 - -save_from_step = 10500
+    # `.
