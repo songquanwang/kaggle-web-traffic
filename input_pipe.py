@@ -36,7 +36,7 @@ class Splitter:
         shuffled_pages = tf.gather(cluster_idx, random_idx)
         # Drop non-existent (uniq_page, agent) pairs. Non-existent pair has index value = -1
         mask = shuffled_pages >= 0
-        # 返回一维数据，指向原始数据中的index
+        # 返回一维数据，选取>0的index 指向原始数据中的index
         page_idx = tf.boolean_mask(shuffled_pages, mask)
         return page_idx
 
@@ -44,20 +44,23 @@ class Splitter:
                  test_sampling=1.0):
         # hits的行数
         size = tensors[0].shape[0].value
-        self.seed = seed
+        self.seed = seed #
+        # 保证 shuffle后，没个页面中的各个agent还连续
         clustered_index = self.cluster_pages(cluster_indexes)
         index_len = tf.shape(clustered_index)[0]
         assert_op = tf.assert_equal(index_len, size, message='n_pages is not equals to size of clustered index')
         # 应该不会被执行 抛出ValueError
         with tf.control_dependencies([assert_op]):
             split_nitems = int(round(size / n_splits))
+            # [333,333,334]
             split_size = [split_nitems] * n_splits
             split_size[-1] = size - (n_splits - 1) * split_nitems
             # 分成三折
             splits = tf.split(clustered_index, split_size)
-            # (1,2,3)--((2,3),(1,3),(1,2)) 原来怕一个网页多个代理混了，现在再shuffle，还得混了？？
+            # (1,2,3)--((2,3),(1,3),(1,2)) 原来怕一个网页多个代理混了，现在再shuffle，还得混了--667 667 666
             complements = [tf.random_shuffle(tf.concat(splits[:i] + splits[i + 1:], axis=0), seed) for i in
                            range(n_splits)]
+            # 333 333 334
             splits = [tf.random_shuffle(split, seed) for split in splits]
 
         def mk_name(prefix, tensor):
@@ -70,6 +73,7 @@ class Splitter:
             train_sampled_size = int(round(train_size * train_sampling))
             test_idx = splits[i][:test_sampled_size]
             train_idx = complements[i][:train_sampled_size]
+            # 对所有tensor进行抽取 train 2/3 test 1/3
             test_set = [tf.gather(tensor, test_idx, name=mk_name('test', tensor)) for tensor in tensors]
             tran_set = [tf.gather(tensor, train_idx, name=mk_name('train', tensor)) for tensor in tensors]
             return Split(test_set, tran_set, test_sampled_size, train_sampled_size)
@@ -358,12 +362,17 @@ if __name__ == '__main__':
     train_skip_first =0
     tf.reset_default_graph()
     forward_split =False
+    train_sampling = 1.0
     if seed:
         tf.set_random_seed(seed)
-
+    sess=tf.Session()
     with tf.device("/cpu:0"):
         inp = VarFeeder.read_vars("data/vars")
-        splitter = FakeSplitter(page_features(inp), 3, seed=seed, test_sampling=eval_sampling)
+        # 恢复变量
+        inp.restore(sess)
+        # splitter = FakeSplitter(page_features(inp), 3, seed=seed, test_sampling=eval_sampling)
+        splitter = Splitter(page_features(inp), inp.page_map, 3, train_sampling=train_sampling,
+                            test_sampling=eval_sampling, seed=seed)
 
     real_train_pages = splitter.splits[0].train_size
     real_eval_pages = splitter.splits[0].test_size
